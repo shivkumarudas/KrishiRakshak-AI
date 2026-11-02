@@ -122,7 +122,7 @@ export default function DashboardPage({ location, onOpenLocationModal, setActive
         {weatherLoading && <LoadingSpinner message="Retrieving Open-Meteo weather forecast..." />}
 
         {weatherError && (
-          <div className="alert alert-danger">
+          <div className="alert alert-danger" style={{ marginBottom: '1rem' }}>
             <AlertCircle size={20} />
             <div>
               <strong>Weather Service Notice:</strong> {weatherError}
@@ -130,6 +130,39 @@ export default function DashboardPage({ location, onOpenLocationModal, setActive
                 Retry
               </button>
             </div>
+          </div>
+        )}
+
+        {weatherData && weatherData.notice && (
+          <div style={{
+            backgroundColor: '#fff8e1',
+            border: '1px solid #ffe082',
+            borderRadius: 'var(--radius-sm)',
+            padding: '0.5rem 0.75rem',
+            marginBottom: '0.75rem',
+            fontSize: '0.82rem',
+            color: '#b45309',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+          }}>
+            <AlertCircle size={16} />
+            <span>{weatherData.notice}</span>
+          </div>
+        )}
+
+        {weatherData && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+            <div>
+              {weatherData.fetched_at && (
+                <span>Forecast generated: <strong>{new Date(weatherData.fetched_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</strong></span>
+              )}
+            </div>
+            {weatherData.is_cached && (
+              <span className="badge badge-secondary" style={{ fontSize: '0.7rem' }}>
+                {weatherData.is_stale ? '⚡ Cached Fallback' : 'Cached Forecast'}
+              </span>
+            )}
           </div>
         )}
 

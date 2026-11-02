@@ -270,11 +270,14 @@ class TestWeatherCacheAndRateLimiting:
         """HTTP 429 returns a friendly user error rather than an unhandled 502 crash."""
         mock_response = MagicMock()
         mock_response.status_code = 429
+        mock_response.headers = {"Retry-After": "45"}
         mock_get.return_value = mock_response
 
         result = fetch_weather(18.52, 73.86)
         assert "error" in result
         assert "rate limit reached" in result["error"].lower()
+        assert result.get("status_code") == 429
+        assert result.get("retry_after") == 45
 
     @patch("tools.weather_tool.requests.get")
     def test_http_429_returns_stale_cache_when_available(self, mock_get):
@@ -292,10 +295,125 @@ class TestWeatherCacheAndRateLimiting:
 
         mock_response = MagicMock()
         mock_response.status_code = 429
+        mock_response.headers = {"Retry-After": "60"}
         mock_get.return_value = mock_response
 
         result = fetch_weather(18.52, 73.86)
         assert "error" not in result
         assert result["dates"] == ["2026-11-02"]
         assert result.get("is_stale_fallback") is True
+        assert result.get("is_cached") is True
         assert "notice" in result
+
+    @patch("tools.weather_tool.requests.get")
+    def test_rate_limit_cooldown_prevents_subsequent_http_calls(self, mock_get):
+        """Subsequent requests during the cooldown window do not call Open-Meteo."""
+        import os
+        from tools.weather_tool import _set_rate_limited, _is_rate_limited
+
+        # Set a 60-second rate-limit cooldown
+        _set_rate_limited(60)
+        is_limited, remaining = _is_rate_limited()
+        assert is_limited is True
+        assert remaining > 0
+
+        # Run with cache enabled so rate limit check is active
+        with patch.dict(os.environ, {"ENABLE_TEST_CACHE": "true"}):
+            result = fetch_weather(18.52, 73.86)
+            # requests.get should NOT be called at all
+            mock_get.assert_not_called()
+            assert "error" in result
+            assert result.get("status_code") == 429
+            assert result.get("retry_after") > 0
+
+    @patch("tools.weather_tool.requests.get")
+    def test_cache_hit_avoids_network_call_and_sets_cached_flag(self, mock_get):
+        """When cache is populated, subsequent fetch returns cached forecast without network."""
+        import os
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "daily": {
+                "time": ["2026-11-02", "2026-11-03", "2026-11-04"],
+                "precipitation_probability_max": [10, 20, 0],
+                "precipitation_sum": [0.0, 1.0, 0.0],
+                "weather_code": [1, 2, 0],
+            }
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        with patch.dict(os.environ, {"ENABLE_TEST_CACHE": "true"}):
+            # First fetch: calls network
+            res1 = fetch_weather(18.52, 73.86)
+            assert mock_get.call_count == 1
+            assert res1.get("is_cached") is False
+            assert "fetched_at" in res1
+            first_timestamp = res1["fetched_at"]
+
+            # Second fetch: served from cache, no second network call
+            res2 = fetch_weather(18.5201, 73.8601)  # nearby coordinate in same cell
+            assert mock_get.call_count == 1
+            assert res2.get("is_cached") is True
+            assert res2.get("is_stale") is False
+            assert res2.get("fetched_at") == first_timestamp
+
+    @patch("tools.weather_tool.requests.get")
+    def test_force_refresh_bypasses_cache(self, mock_get):
+        """force_refresh=True forces a fresh API request even if cached."""
+        import os
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "daily": {
+                "time": ["2026-11-02"],
+                "precipitation_probability_max": [10],
+                "precipitation_sum": [0.0],
+                "weather_code": [1],
+            }
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        with patch.dict(os.environ, {"ENABLE_TEST_CACHE": "true"}):
+            fetch_weather(18.52, 73.86)
+            assert mock_get.call_count == 1
+
+            # force_refresh=True makes a 2nd call
+            fetch_weather(18.52, 73.86, force_refresh=True)
+            assert mock_get.call_count == 2
+
+    def test_disk_cache_save_and_reload(self, tmp_path):
+        """Disk cache survives in-memory cache clearing."""
+        from tools.weather_tool import store_weather_cache, get_cached_weather, _load_disk_cache, _weather_cache_lock, _weather_cache
+        import tools.weather_tool
+        import os
+
+        test_cache_file = tmp_path / "test_weather_cache.json"
+        orig_file = tools.weather_tool._CACHE_FILE_PATH
+        tools.weather_tool._CACHE_FILE_PATH = test_cache_file
+
+        try:
+            with patch.dict(os.environ, {"ENABLE_TEST_CACHE": "true"}):
+                sample_data = {
+                    "dates": ["2026-11-02"],
+                    "source": "Open-Meteo",
+                    "fetched_at": "2026-11-02T10:00:00+00:00",
+                }
+                store_weather_cache(18.52, 73.86, sample_data, ttl=300)
+                assert test_cache_file.exists()
+
+                # Clear in-memory dictionary
+                with _weather_cache_lock:
+                    _weather_cache.clear()
+                assert get_cached_weather(18.52, 73.86) is None
+
+                # Reload from disk
+                _load_disk_cache()
+                reloaded = get_cached_weather(18.52, 73.86)
+                assert reloaded is not None
+                assert reloaded["dates"] == ["2026-11-02"]
+        finally:
+            tools.weather_tool._CACHE_FILE_PATH = orig_file

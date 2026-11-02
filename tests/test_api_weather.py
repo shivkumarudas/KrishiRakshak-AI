@@ -135,3 +135,44 @@ class TestWeatherEndpoint:
         response = client.get("/api/weather?latitude=18.52&longitude=73.86")
         assert response.status_code == 502
         assert "Open-Meteo timeout" in response.json()["detail"]
+
+    @patch("api.routes.weather.fetch_weather")
+    def test_get_weather_rate_limit_returns_429_and_retry_after_header(self, mock_fetch):
+        """When weather provider hits 429 and no cache exists, returns 429 with Retry-After header."""
+        mock_fetch.return_value = {
+            "error": "Weather forecast service is temporarily busy (rate limit reached). Please wait a few moments and try again.",
+            "retry_after": 75,
+            "status_code": 429,
+        }
+
+        response = client.get("/api/weather?latitude=18.52&longitude=73.86")
+        assert response.status_code == 429
+        assert "rate limit reached" in response.json()["detail"].lower()
+        assert response.headers.get("retry-after") == "75"
+
+    @patch("api.routes.weather.fetch_weather")
+    def test_get_weather_returns_cached_and_stale_metadata(self, mock_fetch):
+        """When cached/stale fallback is used, response includes cache flags, timestamp and notice."""
+        forecast = self._mock_forecast()
+        forecast["is_cached"] = True
+        forecast["is_stale"] = True
+        forecast["fetched_at"] = "2026-11-02T12:00:00+00:00"
+        forecast["notice"] = "Displaying recent forecast due to temporary weather provider rate limits."
+        mock_fetch.return_value = forecast
+
+        response = client.get("/api/weather?latitude=18.52&longitude=73.86")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["is_cached"] is True
+        assert data["is_stale"] is True
+        assert data["fetched_at"] == "2026-11-02T12:00:00+00:00"
+        assert "rate limits" in data["notice"]
+
+    @patch("api.routes.weather.fetch_weather")
+    def test_get_weather_passes_force_refresh(self, mock_fetch):
+        """force_refresh query parameter is passed to fetch_weather."""
+        mock_fetch.return_value = self._mock_forecast()
+
+        response = client.get("/api/weather?latitude=18.52&longitude=73.86&force_refresh=true")
+        assert response.status_code == 200
+        mock_fetch.assert_called_once_with(18.52, 73.86, force_refresh=True)

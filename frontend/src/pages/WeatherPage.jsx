@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { CloudSun, MapPin, RefreshCw, Info, CloudRain, Droplets } from 'lucide-react';
+import { CloudSun, MapPin, RefreshCw, Info } from 'lucide-react';
 import { getWeather } from '../api';
 import WeatherCard from '../components/WeatherCard';
 import LocationSearch from '../components/LocationSearch';
@@ -112,7 +112,36 @@ export default function WeatherPage({ location, setLocation }) {
           <div style={{ textAlign: 'right', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
             <div>Data Source: <strong>{forecast?.source || 'Open-Meteo'}</strong></div>
             <div>Forecast Horizon: <strong>3 Days</strong></div>
+            {forecast?.fetched_at && (
+              <div>Updated: <strong>{new Date(forecast.fetched_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</strong></div>
+            )}
+            {forecast?.is_cached && (
+              <div style={{ marginTop: '0.25rem' }}>
+                <span className="badge badge-secondary" style={{ fontSize: '0.7rem' }}>
+                  {forecast.is_stale ? '⚡ Cached Fallback' : 'Cached Forecast'}
+                </span>
+              </div>
+            )}
           </div>
+        </div>
+      )}
+
+      {/* Weather Provider Notice (e.g. rate limit cooldown / fallback) */}
+      {forecast?.notice && (
+        <div style={{
+          backgroundColor: '#fff8e1',
+          border: '1px solid #ffe082',
+          borderRadius: 'var(--radius-sm)',
+          padding: '0.6rem 0.9rem',
+          marginBottom: '1.25rem',
+          fontSize: '0.85rem',
+          color: '#b45309',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.5rem',
+        }}>
+          <Info size={18} />
+          <span>{forecast.notice}</span>
         </div>
       )}
 
@@ -139,6 +168,7 @@ export default function WeatherPage({ location, setLocation }) {
                 weatherCode={forecast.weather_codes[idx]}
                 guidance={forecast.daily_guidance?.[idx]}
                 source={forecast.source}
+                isToday={idx === 0}
               />
             ))}
           </div>

@@ -130,17 +130,25 @@ async def get_weather(
         default="Unknown",
         description="Display name for the location",
     ),
+    force_refresh: bool = Query(
+        default=False,
+        description="Bypass cache and force live forecast retrieval",
+    ),
 ):
     """Retrieve a three-day weather forecast with rule-based guidance."""
 
-    forecast = fetch_weather(latitude, longitude)
+    forecast = fetch_weather(latitude, longitude, force_refresh=force_refresh)
 
     if "error" in forecast:
         error_msg = forecast["error"]
-        status_code = 429 if "rate limit" in error_msg.lower() or "429" in error_msg else 502
+        retry_after = forecast.get("retry_after", 60)
+        is_rate_limit = "rate limit" in error_msg.lower() or "429" in error_msg
+        headers = {"Retry-After": str(retry_after)} if is_rate_limit else None
+        status_code = 429 if is_rate_limit else 502
         raise HTTPException(
             status_code=status_code,
             detail=error_msg,
+            headers=headers,
         )
 
     dates = forecast.get("dates", [])
@@ -190,4 +198,8 @@ async def get_weather(
         rainfall_mm=rainfall_values,
         weather_codes=weather_codes,
         daily_guidance=daily_guidance,
+        is_cached=forecast.get("is_cached", False),
+        is_stale=forecast.get("is_stale", False),
+        fetched_at=forecast.get("fetched_at"),
+        notice=forecast.get("notice"),
     )

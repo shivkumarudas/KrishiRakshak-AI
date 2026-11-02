@@ -52,6 +52,10 @@ class WeatherResponse(BaseModel):
     rainfall_mm: list[Optional[float]]
     weather_codes: list[int]
     daily_guidance: list[DayGuidance] = []
+    is_cached: bool = False
+    is_stale: bool = False
+    fetched_at: Optional[str] = None
+    notice: Optional[str] = None
     disclaimer: str = (
         "Forecasts can change. This is general weather-based "
         "guidance, not a verified crop-specific recommendation."
