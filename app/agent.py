@@ -26,7 +26,7 @@ load_dotenv()
 logging.getLogger("strands").setLevel(logging.WARNING)
 
 
-def _create_agent():
+def _create_agent(model_id=None):
     """Create the Strands AI agent. Requires GOOGLE_API_KEY."""
 
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -36,9 +36,11 @@ def _create_agent():
             "GOOGLE_API_KEY not found. Check your .env file."
         )
 
+    chosen_model = model_id or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+
     model = GeminiModel(
         client_args={"api_key": api_key},
-        model_id="gemini-3.8-flash",
+        model_id=chosen_model,
         params={"max_output_tokens": 2048},
     )
 

@@ -214,3 +214,29 @@ class TestImageAnalysis:
         assert result["status"] == "vision_unavailable"
         assert "timed out" in result["message"].lower()
         assert "safety_note" in result
+
+    @patch("google.genai.Client")
+    @patch.dict("os.environ", {"GOOGLE_API_KEY": "fake_test_key"})
+    def test_model_fallback_on_unavailable_primary(self, mock_client_cls):
+        """When primary model fails with 503 / 404, service falls back to next candidate."""
+        mock_response = MagicMock()
+        mock_response.text = json.dumps({"visible_plant_parts": ["leaf"]})
+
+        mock_client = MagicMock()
+        # First call fails (e.g. 503 Service Unavailable), second call succeeds
+        mock_client.models.generate_content.side_effect = [
+            Exception("503 Service Unavailable: Model overloaded"),
+            mock_response,
+        ]
+        mock_client_cls.return_value = mock_client
+
+        result = analyze_crop_image_bytes(
+            VALID_JPEG,
+            "image/jpeg",
+            "cotton_leaf.jpg",
+            crop="cotton",
+        )
+
+        assert result["status"] == "analysis_completed"
+        assert result["model_used"] in ["gemini-3.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.8-flash"]
+        assert mock_client.models.generate_content.call_count == 2

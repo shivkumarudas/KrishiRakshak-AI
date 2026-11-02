@@ -13,25 +13,29 @@ app = FastAPI(
 )
 
 # CORS configuration
-# Allowed origins for development (Vite default is 5173)
+default_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "https://krishi-rakshak-ai-two.vercel.app",
+]
 env_origins = os.getenv("ALLOWED_ORIGINS", "")
+origins = list(default_origins)
 if env_origins:
-    origins = [orig.strip() for orig in env_origins.split(",") if orig.strip()]
-else:
-    origins = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ]
+    for orig in env_origins.split(","):
+        cleaned = orig.strip()
+        if cleaned and cleaned not in origins:
+            origins.append(cleaned)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 

@@ -16,9 +16,11 @@ logger = logging.getLogger(__name__)
 _agent_instance = None
 
 
-def get_agent():
-    """Retrieve or initialize the Strands agent."""
+def get_agent(model_id: str = None):
+    """Retrieve or initialize the Strands agent for a given model."""
     global _agent_instance
+    if model_id is not None:
+        return _create_agent(model_id=model_id)
     if _agent_instance is None:
         _agent_instance = _create_agent()
     return _agent_instance
@@ -112,40 +114,61 @@ async def chat_with_assistant(request: ChatRequest):
 
     full_prompt = "\n\n".join(prompt_sections)
 
-    try:
-        agent = get_agent()
-        agent_response = agent(full_prompt)
-        return ChatResponse(
-            response=str(agent_response),
-            weather_included=weather_included,
-            fallback_used=False,
-        )
-    except Exception as error:
-        err_str = str(error).lower()
-        logger.warning("AI model invocation failed: %s", error)
+    chat_models = [
+        os.getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+        "gemini-3.5-flash-lite",
+        "gemini-2.0-flash",
+    ]
+    deduped_models = []
+    for m in chat_models:
+        if m and m not in deduped_models:
+            deduped_models.append(m)
 
-        # Build informative, safe fallback message
-        fallback_prefix = (
-            "⚠️ The AI language assistant is temporarily unavailable "
-            "(service limit or network issue)."
-        )
-
-        if forecast_data and location_text:
-            weather_text = generate_offline_weather_text(forecast_data, location_text)
-            fallback_message = (
-                f"{fallback_prefix}\n\n"
-                f"Here is the local weather forecast and agricultural guidance based on rules:\n\n"
-                f"{weather_text}"
+    last_error = None
+    for candidate_model in deduped_models:
+        try:
+            agent = get_agent(model_id=candidate_model)
+            agent_response = agent(full_prompt)
+            return ChatResponse(
+                response=str(agent_response),
+                weather_included=weather_included,
+                fallback_used=False,
             )
-        else:
-            fallback_message = (
-                f"{fallback_prefix}\n\n"
-                "You can still use the dedicated Weather Forecast, Crop Assessment, "
-                "and Agricultural Advisory sections from the dashboard without AI."
-            )
+        except Exception as error:
+            last_error = error
+            err_str = str(error).lower()
+            logger.warning("AI model '%s' invocation failed: %s", candidate_model, error)
+            # If quota limit reached or auth error, break immediately to avoid compounding
+            if "quota" in err_str or "429" in err_str or "resource_exhausted" in err_str:
+                break
+            if "api_key" in err_str or "auth" in err_str or "unauthenticated" in err_str:
+                break
 
-        return ChatResponse(
-            response=fallback_message,
-            weather_included=weather_included,
-            fallback_used=True,
+    # If all candidate models failed or quota was exhausted, build informative safe fallback
+    error = last_error
+    logger.warning("All AI models failed, using rule-based fallback: %s", error)
+
+    fallback_prefix = (
+        "⚠️ The AI language assistant is temporarily unavailable "
+        "(service limit or network issue)."
+    )
+
+    if forecast_data and location_text:
+        weather_text = generate_offline_weather_text(forecast_data, location_text)
+        fallback_message = (
+            f"{fallback_prefix}\n\n"
+            f"Here is the local weather forecast and agricultural guidance based on rules:\n\n"
+            f"{weather_text}"
         )
+    else:
+        fallback_message = (
+            f"{fallback_prefix}\n\n"
+            "You can still use the dedicated Weather Forecast, Crop Assessment, "
+            "and Agricultural Advisory sections from the dashboard without AI."
+        )
+
+    return ChatResponse(
+        response=fallback_message,
+        weather_included=weather_included,
+        fallback_used=True,
+    )

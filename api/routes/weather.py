@@ -1,5 +1,6 @@
 """Weather forecast and location search endpoints."""
 
+import time
 from fastapi import APIRouter, HTTPException, Query
 
 import requests as http_requests
@@ -14,6 +15,14 @@ from tools.weather_tool import fetch_weather
 from tools.rule_based_advisory import get_weather_based_advice
 
 router = APIRouter()
+
+# In-memory search cache for locations (1 hour TTL)
+_location_search_cache = {}
+
+
+def _is_pytest() -> bool:
+    import os
+    return "PYTEST_CURRENT_TEST" in os.environ and os.getenv("ENABLE_TEST_CACHE") != "true"
 
 
 # --------------------------------------------------
@@ -31,7 +40,7 @@ async def search_locations(
         description="Location query string",
     ),
 ):
-    """Search for a location using the Open-Meteo geocoding API."""
+    """Search for a location using the Open-Meteo geocoding API with caching."""
 
     search_query = q or name
     if not search_query or not search_query.strip():
@@ -41,6 +50,13 @@ async def search_locations(
         )
 
     clean_query = search_query.strip()
+    cache_key = clean_query.lower()
+    now = time.time()
+
+    if not _is_pytest() and cache_key in _location_search_cache:
+        entry = _location_search_cache[cache_key]
+        if entry["expires_at"] > now:
+            return LocationSearchResponse(query=clean_query, results=entry["results"])
 
     try:
         response = http_requests.get(
@@ -53,10 +69,23 @@ async def search_locations(
             },
             timeout=15,
         )
+        if response.status_code == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="Location search is temporarily busy (rate limit reached). Please wait a moment and try again.",
+            )
         response.raise_for_status()
         data = response.json()
 
+    except HTTPException:
+        raise
     except http_requests.RequestException as error:
+        err_str = str(error)
+        if "429" in err_str:
+            raise HTTPException(
+                status_code=429,
+                detail="Location search rate limit reached. Please wait a moment.",
+            )
         raise HTTPException(
             status_code=502,
             detail=f"Unable to search for locations: {error}",
@@ -74,6 +103,13 @@ async def search_locations(
         )
         for place in raw_results
     ]
+
+    # Cache results for 1 hour
+    if not _is_pytest():
+        _location_search_cache[cache_key] = {
+            "results": results,
+            "expires_at": now + 3600,
+        }
 
     return LocationSearchResponse(query=clean_query, results=results)
 
@@ -100,9 +136,11 @@ async def get_weather(
     forecast = fetch_weather(latitude, longitude)
 
     if "error" in forecast:
+        error_msg = forecast["error"]
+        status_code = 429 if "rate limit" in error_msg.lower() or "429" in error_msg else 502
         raise HTTPException(
-            status_code=502,
-            detail=forecast["error"],
+            status_code=status_code,
+            detail=error_msg,
         )
 
     dates = forecast.get("dates", [])

@@ -19,11 +19,11 @@ export default function WeatherPage({ location, setLocation }) {
     }
   }, [location]);
 
-  const loadForecast = async (loc) => {
+  const loadForecast = async (loc, force = false) => {
     setLoading(true);
     setError('');
     try {
-      const data = await getWeather(loc.latitude, loc.longitude, loc.name);
+      const data = await getWeather(loc.latitude, loc.longitude, loc.name, force);
       setForecast(data);
     } catch (err) {
       setError(err.message || 'Unable to retrieve weather forecast.');
@@ -57,7 +57,7 @@ export default function WeatherPage({ location, setLocation }) {
           </button>
           <button
             type="button"
-            onClick={() => location && loadForecast(location)}
+            onClick={() => location && loadForecast(location, true)}
             className="btn btn-secondary"
             disabled={loading}
             style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}

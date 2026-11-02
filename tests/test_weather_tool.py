@@ -210,3 +210,92 @@ class TestGetWeatherForecast:
         assert "error" in get_weather_forecast("   ")
         assert "error" in get_weather_forecast(None)
         assert "error" in get_weather_forecast(12345)
+
+
+class TestWeatherCacheAndRateLimiting:
+    """Tests for weather forecast caching and 429 rate-limiting resilience."""
+
+    def setup_method(self):
+        from tools.weather_tool import clear_weather_cache
+        clear_weather_cache()
+
+    def teardown_method(self):
+        from tools.weather_tool import clear_weather_cache
+        clear_weather_cache()
+
+    def test_cache_storage_and_retrieval(self):
+        """Weather data is stored and retrieved by coordinate cell."""
+        from tools.weather_tool import store_weather_cache, get_cached_weather
+
+        mock_data = {
+            "dates": ["2026-11-02", "2026-11-03", "2026-11-04"],
+            "rain_probability_percent": [10, 20, 0],
+            "rainfall_mm": [0.0, 1.2, 0.0],
+            "weather_codes": [1, 2, 0],
+            "source": "Open-Meteo",
+        }
+
+        store_weather_cache(18.5204, 73.8567, mock_data, ttl=60)
+
+        # Coordinate rounding matches within ~1km cell (18.52, 73.86)
+        cached = get_cached_weather(18.5211, 73.8572)
+        assert cached is not None
+        assert cached["dates"] == ["2026-11-02", "2026-11-03", "2026-11-04"]
+        assert cached["source"] == "Open-Meteo"
+
+    def test_expired_cache_not_returned_by_default(self):
+        """Expired cache entries are ignored by default."""
+        from tools.weather_tool import store_weather_cache, get_cached_weather
+
+        mock_data = {"dates": ["2026-11-02"], "source": "Open-Meteo"}
+        store_weather_cache(18.52, 73.86, mock_data, ttl=-10)  # already expired
+
+        assert get_cached_weather(18.52, 73.86, allow_expired=False) is None
+
+    def test_expired_cache_returned_when_allowed_with_notice(self):
+        """Expired cache entries are returned with safety notice when allow_expired=True."""
+        from tools.weather_tool import store_weather_cache, get_cached_weather
+
+        mock_data = {"dates": ["2026-11-02"], "source": "Open-Meteo"}
+        store_weather_cache(18.52, 73.86, mock_data, ttl=-10)
+
+        stale = get_cached_weather(18.52, 73.86, allow_expired=True)
+        assert stale is not None
+        assert stale["is_cached"] is True
+        assert stale["is_stale_fallback"] is True
+        assert "notice" in stale
+
+    @patch("tools.weather_tool.requests.get")
+    def test_http_429_returns_clean_error_when_no_cache(self, mock_get):
+        """HTTP 429 returns a friendly user error rather than an unhandled 502 crash."""
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_get.return_value = mock_response
+
+        result = fetch_weather(18.52, 73.86)
+        assert "error" in result
+        assert "rate limit reached" in result["error"].lower()
+
+    @patch("tools.weather_tool.requests.get")
+    def test_http_429_returns_stale_cache_when_available(self, mock_get):
+        """HTTP 429 returns recent cached forecast with notice if available."""
+        from tools.weather_tool import store_weather_cache
+
+        mock_data = {
+            "dates": ["2026-11-02"],
+            "rain_probability_percent": [5],
+            "rainfall_mm": [0.0],
+            "weather_codes": [1],
+            "source": "Open-Meteo",
+        }
+        store_weather_cache(18.52, 73.86, mock_data, ttl=-5)  # expired cache entry
+
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_get.return_value = mock_response
+
+        result = fetch_weather(18.52, 73.86)
+        assert "error" not in result
+        assert result["dates"] == ["2026-11-02"]
+        assert result.get("is_stale_fallback") is True
+        assert "notice" in result

@@ -3,7 +3,20 @@
  * Centralized HTTP client connecting the React UI to the FastAPI backend.
  */
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
+const PRODUCTION_RENDER_BACKEND_URL = 'https://krishirakshak-ai-21mm.onrender.com/api';
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || (
+  typeof window !== 'undefined' && window.location.hostname.includes('vercel.app')
+    ? PRODUCTION_RENDER_BACKEND_URL
+    : '/api'
+);
+
+// Client-side in-memory caches to eliminate redundant fetches on route navigation
+const weatherCache = new Map(); // key -> { data, timestamp }
+const advisoriesCache = new Map(); // key -> { data, timestamp }
+
+const WEATHER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const ADVISORIES_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Handle API response, parsing JSON and extracting descriptive error messages.
@@ -51,15 +64,29 @@ export async function searchLocations(query) {
  * @param {number} latitude
  * @param {number} longitude
  * @param {string} locationName
+ * @param {boolean} forceRefresh - If true, bypasses frontend cache
  */
-export async function getWeather(latitude, longitude, locationName = 'Unknown') {
+export async function getWeather(latitude, longitude, locationName = 'Unknown', forceRefresh = false) {
+  const cacheKey = `${Number(latitude).toFixed(2)}_${Number(longitude).toFixed(2)}`;
+  const now = Date.now();
+
+  if (!forceRefresh && weatherCache.has(cacheKey)) {
+    const entry = weatherCache.get(cacheKey);
+    if (now - entry.timestamp < WEATHER_CACHE_TTL_MS) {
+      return entry.data;
+    }
+  }
+
   const params = new URLSearchParams({
     latitude: latitude.toString(),
     longitude: longitude.toString(),
     location_name: locationName,
   });
   const res = await fetch(`${API_BASE}/weather?${params.toString()}`);
-  return handleResponse(res);
+  const data = await handleResponse(res);
+
+  weatherCache.set(cacheKey, { data, timestamp: now });
+  return data;
 }
 
 /**
@@ -104,6 +131,7 @@ export async function analyzeCropImage(file, crop = null, growthStage = null, no
  * @param {string} [region] - optional region filter
  * @param {string} [verificationStatus] - optional status filter ('verified_current_seasonal', etc.)
  * @param {boolean} [includeHistorical] - whether to include historical references
+ * @param {boolean} [forceRefresh] - whether to bypass client cache
  */
 export async function getAdvisories(
   crop,
@@ -111,8 +139,19 @@ export async function getAdvisories(
   stage = null,
   region = null,
   verificationStatus = null,
-  includeHistorical = true
+  includeHistorical = true,
+  forceRefresh = false
 ) {
+  const cacheKey = `${crop}_${checkSources}_${stage || ''}_${region || ''}_${verificationStatus || ''}_${includeHistorical}`;
+  const now = Date.now();
+
+  if (!forceRefresh && !checkSources && advisoriesCache.has(cacheKey)) {
+    const entry = advisoriesCache.get(cacheKey);
+    if (now - entry.timestamp < ADVISORIES_CACHE_TTL_MS) {
+      return entry.data;
+    }
+  }
+
   const payload = {
     crop: crop.toLowerCase(),
     check_sources: checkSources,
@@ -127,7 +166,12 @@ export async function getAdvisories(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  return handleResponse(res);
+  const data = await handleResponse(res);
+
+  if (!checkSources) {
+    advisoriesCache.set(cacheKey, { data, timestamp: now });
+  }
+  return data;
 }
 
 /**

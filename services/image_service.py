@@ -211,12 +211,12 @@ def analyze_crop_image_bytes(
         }
 
     # 4. Check model selection & verify vision capability
-    vision_model = model_id or os.getenv("GEMINI_VISION_MODEL", "gemini-3.8-flash")
-    if not is_vision_capable_model(vision_model):
+    requested_model = model_id or os.getenv("GEMINI_VISION_MODEL")
+    if requested_model and not is_vision_capable_model(requested_model):
         return {
             "status": "vision_unavailable",
             "message": (
-                f"Configured model '{vision_model}' does not support multimodal image input. "
+                f"Configured model '{requested_model}' does not support multimodal image input. "
                 "A vision-capable model is required."
             ),
             "crop": canonical_crop or "Unspecified",
@@ -228,6 +228,15 @@ def analyze_crop_image_bytes(
                 "for an in-person field assessment."
             ),
         }
+
+    candidate_models = []
+    if requested_model:
+        candidate_models.append(requested_model.strip())
+
+    # Fallback candidates prioritizing verified active multimodal models
+    for fallback in ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.8-flash"]:
+        if fallback not in candidate_models:
+            candidate_models.append(fallback)
 
     # 5. Build structured agronomic vision prompt
     crop_context_lines = []
@@ -271,11 +280,36 @@ CRITICAL RULES:
         client = genai.Client(api_key=api_key)
         image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
-        response = client.models.generate_content(
-            model=vision_model,
-            contents=[prompt, image_part],
-        )
+        response = None
+        successful_model = None
+        last_error = None
 
+        for candidate in candidate_models:
+            try:
+                response = client.models.generate_content(
+                    model=candidate,
+                    contents=[prompt, image_part],
+                )
+                successful_model = candidate
+                break
+            except Exception as candidate_err:
+                last_error = candidate_err
+                err_str = str(candidate_err).lower()
+                logger.info("Candidate vision model '%s' failed: %s", candidate, candidate_err)
+
+                # Stop if rate limited or authentication error
+                if "quota" in err_str or "429" in err_str or "resource_exhausted" in err_str:
+                    break
+                if "api_key" in err_str or "auth" in err_str or "unauthenticated" in err_str:
+                    break
+                # If a single specific model was passed in model_id, do not silently switch
+                if model_id is not None:
+                    break
+
+        if response is None:
+            raise last_error or RuntimeError("No response from vision AI model.")
+
+        vision_model = successful_model
         analysis_text = response.text if response and response.text else "No textual analysis generated."
         parsed = _parse_vision_response_to_dict(analysis_text)
 
