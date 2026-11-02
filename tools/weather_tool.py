@@ -36,8 +36,10 @@ _last_retry_after: int = 60
 _coord_fetch_locks = {}
 _coord_locks_mutex = threading.Lock()
 
-# Persistent disk cache path
-_CACHE_FILE_PATH = Path(os.getenv("WEATHER_CACHE_FILE", Path(__file__).resolve().parent.parent / "data" / ".weather_cache.json"))
+# Persistent disk cache paths
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_SEED_CACHE_FILE = _DATA_DIR / "seed_weather_cache.json"
+_CACHE_FILE_PATH = Path(os.getenv("WEATHER_CACHE_FILE", _DATA_DIR / ".runtime_weather_cache.json"))
 
 
 def _is_pytest_running() -> bool:
@@ -98,26 +100,27 @@ def _parse_retry_after(response: requests.Response) -> int:
 
 
 def _load_disk_cache() -> None:
-    """Load persistent weather cache from disk if available."""
+    """Load persistent and seed weather cache from disk if available."""
     if _is_pytest_running():
         return
-    if not _CACHE_FILE_PATH.exists():
-        return
-    try:
-        with _CACHE_FILE_PATH.open("r", encoding="utf-8") as f:
-            persisted = json.load(f)
-        with _weather_cache_lock:
-            for key_str, entry in persisted.items():
-                try:
-                    lat_str, lon_str = key_str.split(",")
-                    key = (round(float(lat_str), 2), round(float(lon_str), 2))
-                    if key not in _weather_cache:
-                        _weather_cache[key] = entry
-                except (ValueError, KeyError):
-                    continue
-        logger.info("Loaded %d weather cache entries from disk.", len(_weather_cache))
-    except Exception as exc:
-        logger.debug("Failed to load disk weather cache: %s", exc)
+    for path in (_SEED_CACHE_FILE, _CACHE_FILE_PATH):
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                persisted = json.load(f)
+            with _weather_cache_lock:
+                for key_str, entry in persisted.items():
+                    try:
+                        lat_str, lon_str = key_str.split(",")
+                        key = (round(float(lat_str), 2), round(float(lon_str), 2))
+                        if key not in _weather_cache or path == _CACHE_FILE_PATH:
+                            _weather_cache[key] = entry
+                    except (ValueError, KeyError):
+                        continue
+        except Exception as exc:
+            logger.debug("Failed to load disk weather cache from %s: %s", path, exc)
+    logger.info("Loaded %d weather cache entries from disk.", len(_weather_cache))
 
 
 def _save_disk_cache() -> None:

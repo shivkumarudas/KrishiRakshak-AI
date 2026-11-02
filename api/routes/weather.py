@@ -5,13 +5,15 @@ from fastapi import APIRouter, HTTPException, Query
 
 import requests as http_requests
 
+from pydantic import BaseModel
+from typing import Optional
 from api.models import (
     LocationResult,
     LocationSearchResponse,
     WeatherResponse,
     DayGuidance,
 )
-from tools.weather_tool import fetch_weather
+from tools.weather_tool import fetch_weather, store_weather_cache
 from tools.rule_based_advisory import get_weather_based_advice
 
 router = APIRouter()
@@ -203,3 +205,28 @@ async def get_weather(
         fetched_at=forecast.get("fetched_at"),
         notice=forecast.get("notice"),
     )
+
+
+class WeatherCachePayload(BaseModel):
+    latitude: float
+    longitude: float
+    dates: list[str]
+    rain_probability_percent: list[Optional[int]]
+    rainfall_mm: list[Optional[float]]
+    weather_codes: list[int]
+    source: str = "Open-Meteo"
+
+
+@router.post("/weather/cache")
+async def cache_client_weather(payload: WeatherCachePayload):
+    """Ingest weather forecast fetched directly by client into backend cache."""
+    data = {
+        "dates": payload.dates,
+        "rain_probability_percent": payload.rain_probability_percent,
+        "rainfall_mm": payload.rainfall_mm,
+        "weather_codes": payload.weather_codes,
+        "source": payload.source,
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    store_weather_cache(payload.latitude, payload.longitude, data)
+    return {"status": "ok", "cached": True}

@@ -48,7 +48,105 @@ export async function checkHealth() {
 }
 
 /**
- * Search locations via geocoding
+ * Direct client-side geocoding fallback when backend is rate-limited on shared server IP.
+ */
+async function searchLocationsDirect(query) {
+  try {
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=5&language=en&format=json`;
+    const res = await fetch(url);
+    if (!res.ok) return { query, results: [] };
+    const data = await res.json();
+    const results = (data.results || []).map((place) => ({
+      name: place.name || 'Unknown',
+      region: place.admin1,
+      country: place.country,
+      latitude: place.latitude,
+      longitude: place.longitude,
+    }));
+    return { query, results };
+  } catch {
+    return { query, results: [] };
+  }
+}
+
+/**
+ * Direct client-side meteorological fallback when backend is rate-limited on shared server IP.
+ */
+async function fetchDirectFromOpenMeteo(latitude, longitude, locationName) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&daily=precipitation_probability_max,precipitation_sum,weather_code&forecast_days=3&timezone=Asia%2FKolkata`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Open-Meteo responded with HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  const daily = data.daily || {};
+  const dates = daily.time || [];
+  const probabilities = daily.precipitation_probability_max || [];
+  const rainfalls = daily.precipitation_sum || [];
+  const weatherCodes = daily.weather_code || [];
+
+  const dailyGuidance = dates.map((dateStr, idx) => {
+    const prob = probabilities[idx];
+    const rain = rainfalls[idx];
+    const code = weatherCodes[idx] !== undefined ? weatherCodes[idx] : -1;
+    const risks = [];
+    const advice = [];
+
+    if (prob !== null && prob !== undefined) {
+      if (prob >= 70) {
+        risks.push('High forecast probability of rain');
+        advice.push('Check the latest local forecast before spraying or planning field operations.');
+      } else if (prob >= 30) {
+        risks.push('Some possibility of rain');
+        advice.push('Monitor updated forecasts before deciding when to work in the field.');
+      } else {
+        risks.push('Low forecast probability of rain');
+        advice.push('Check soil moisture and crop needs before deciding whether irrigation is necessary.');
+      }
+    }
+    if (rain !== null && rain !== undefined) {
+      if (rain >= 20) {
+        risks.push('Forecast rainfall of 20 mm or more');
+        advice.push('Check field drainage and watch for waterlogging in low-lying areas.');
+      } else if (rain > 0) {
+        advice.push('Consider the expected rainfall when planning irrigation and field operations.');
+      }
+    }
+    if (code === 45 || code === 48) {
+      risks.push('Foggy conditions forecast');
+      advice.push('Monitor crop conditions and local agricultural guidance.');
+    }
+
+    return {
+      date: dateStr,
+      rain_probability_percent: prob,
+      rainfall_mm: rain,
+      weather_code: code,
+      risks,
+      advice,
+    };
+  });
+
+  return {
+    location_name: locationName,
+    latitude: Number(latitude),
+    longitude: Number(longitude),
+    source: 'Open-Meteo',
+    dates,
+    rain_probability_percent: probabilities,
+    rainfall_mm: rainfalls,
+    weather_codes: weatherCodes,
+    daily_guidance: dailyGuidance,
+    is_cached: false,
+    is_stale: false,
+    fetched_at: new Date().toISOString(),
+    notice: null,
+    disclaimer: 'Forecasts can change. This is general weather-based guidance, not a verified crop-specific recommendation.',
+  };
+}
+
+/**
+ * Search locations via geocoding with direct client-side fallback.
  * @param {string} query - Location name (village, town, district)
  */
 export async function searchLocations(query) {
@@ -57,13 +155,24 @@ export async function searchLocations(query) {
   }
   const clean = query.trim();
   const params = new URLSearchParams({ q: clean, name: clean });
-  const res = await fetch(`${API_BASE}/locations/search?${params.toString()}`);
-  return handleResponse(res);
+  try {
+    const res = await fetch(`${API_BASE}/locations/search?${params.toString()}`);
+    if (res.status === 429) {
+      return await searchLocationsDirect(clean);
+    }
+    return await handleResponse(res);
+  } catch (err) {
+    if (err.status === 429 || err.message?.includes('429') || err.message?.includes('rate limit')) {
+      return await searchLocationsDirect(clean);
+    }
+    throw err;
+  }
 }
 
 /**
  * Fetch 3-day weather forecast with rule-based guidance.
- * Implements client-side in-flight deduplication, caching, and 429 backoff resilience.
+ * Implements client-side in-flight deduplication, caching, and direct-to-Open-Meteo fallback
+ * when backend shared cloud IP experiences rate limits.
  * @param {number} latitude
  * @param {number} longitude
  * @param {string} locationName
@@ -111,20 +220,44 @@ export async function getWeather(latitude, longitude, locationName = 'Unknown', 
 
       const res = await fetch(`${API_BASE}/weather?${params.toString()}`);
 
-      // Handle 429 rate limit with graceful fallback if cached data is present
+      // Handle 429 rate limit with seamless client-side direct fallback
       if (res.status === 429) {
         const retryHeader = res.headers.get('Retry-After');
         const retrySec = retryHeader ? parseInt(retryHeader, 10) : 60;
         weatherRateLimitedUntil = Date.now() + (Math.max(retrySec, 30) * 1000);
 
-        if (weatherCache.has(cacheKey)) {
-          const cached = weatherCache.get(cacheKey).data;
-          return {
-            ...cached,
-            is_cached: true,
-            is_stale: true,
-            notice: `Weather service rate limited. Displaying cached forecast (retry in ${retrySec}s).`,
-          };
+        // Attempt direct client meteorological fetch
+        try {
+          const directData = await fetchDirectFromOpenMeteo(latitude, longitude, locationName);
+          weatherCache.set(cacheKey, { data: directData, timestamp: Date.now() });
+
+          // Background sync to backend cache for assistant / agent
+          fetch(`${API_BASE}/weather/cache`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              latitude: Number(latitude),
+              longitude: Number(longitude),
+              dates: directData.dates,
+              rain_probability_percent: directData.rain_probability_percent,
+              rainfall_mm: directData.rainfall_mm,
+              weather_codes: directData.weather_codes,
+              source: directData.source,
+            }),
+          }).catch(() => {});
+
+          return directData;
+        } catch {
+          // If direct fetch also fails, fall back to cached forecast if present
+          if (weatherCache.has(cacheKey)) {
+            const cached = weatherCache.get(cacheKey).data;
+            return {
+              ...cached,
+              is_cached: true,
+              is_stale: true,
+              notice: `Weather service rate limited. Displaying cached forecast (retry in ${retrySec}s).`,
+            };
+          }
         }
       }
 
@@ -132,17 +265,23 @@ export async function getWeather(latitude, longitude, locationName = 'Unknown', 
       weatherCache.set(cacheKey, { data, timestamp: Date.now() });
       return data;
     } catch (err) {
-      // If network failure or rate limit error, and we have ANY cached forecast, fallback to it!
-      if (weatherCache.has(cacheKey)) {
-        const cached = weatherCache.get(cacheKey).data;
-        return {
-          ...cached,
-          is_cached: true,
-          is_stale: true,
-          notice: 'Weather provider temporarily unavailable. Displaying cached forecast.',
-        };
+      // If network failure or rate limit error, attempt direct client fetch before failing
+      try {
+        const directData = await fetchDirectFromOpenMeteo(latitude, longitude, locationName);
+        weatherCache.set(cacheKey, { data: directData, timestamp: Date.now() });
+        return directData;
+      } catch {
+        if (weatherCache.has(cacheKey)) {
+          const cached = weatherCache.get(cacheKey).data;
+          return {
+            ...cached,
+            is_cached: true,
+            is_stale: true,
+            notice: 'Weather provider temporarily unavailable. Displaying cached forecast.',
+          };
+        }
+        throw err;
       }
-      throw err;
     } finally {
       inFlightWeather.delete(cacheKey);
     }

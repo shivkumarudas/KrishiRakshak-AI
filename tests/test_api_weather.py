@@ -176,3 +176,20 @@ class TestWeatherEndpoint:
         response = client.get("/api/weather?latitude=18.52&longitude=73.86&force_refresh=true")
         assert response.status_code == 200
         mock_fetch.assert_called_once_with(18.52, 73.86, force_refresh=True)
+
+    @patch("api.routes.weather.store_weather_cache")
+    def test_post_weather_cache_sync(self, mock_store):
+        """Client-side direct weather fetch syncs to server cache."""
+        payload = {
+            "latitude": 19.26,
+            "longitude": 76.77,
+            "dates": ["2026-11-02", "2026-11-03", "2026-11-04"],
+            "rain_probability_percent": [5, 10, 0],
+            "rainfall_mm": [0.0, 0.0, 0.0],
+            "weather_codes": [1, 2, 0],
+            "source": "Open-Meteo",
+        }
+        response = client.post("/api/weather/cache", json=payload)
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok", "cached": True}
+        assert mock_store.call_count == 1
