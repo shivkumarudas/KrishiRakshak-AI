@@ -1,0 +1,7 @@
+strands-agents[gemini]
+python-dotenv
+fastapi
+uvicorn
+python-multipart
+pytest
+requests
